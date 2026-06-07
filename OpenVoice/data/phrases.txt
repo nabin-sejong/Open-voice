@@ -1,0 +1,57 @@
+# OpenVoice AAC Quick Phrases
+# One phrase per line. Lines starting with '#' are ignored.
+# Edit this file to customise your phrase board.
+
+# Basic Responses
+Yes
+No
+Maybe
+I Don't Know
+
+# Requests for Help
+Help
+Please Help Me
+Call My Family
+Call 911
+
+# Immediate Needs
+I Need Water
+I Need Food
+I Need Medicine
+I Need The Bathroom
+
+# Medical
+I Am In Pain
+I Feel Sick
+I Need A Doctor
+I Have An Allergy
+
+# Social Phrases
+Hello
+Goodbye
+Thank You
+You're Welcome
+Please
+Excuse Me
+I'm Sorry
+Please Wait
+
+# Comfort / State
+I Am Cold
+I Am Hot
+I Am Tired
+I Am Happy
+I Am Sad
+I Am Scared
+
+# Communication
+Please Repeat
+I Don't Understand
+Can You Write That Down?
+Please Speak Slowly
+
+# Daily Activities
+I Need Help Getting Up
+I Want To Go Outside
+I Want To Watch TV
+I Want To Sleep
