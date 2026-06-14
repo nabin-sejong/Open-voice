@@ -2,7 +2,8 @@
  * OpenVoice AAC Communicator
  * src/export.c - WAV Export Implementation
  *
- * Uses eSpeak NG's -w flag to write synthesised speech to a WAV file.
+ * Uses Windows SAPI (via PowerShell System.Speech) to write
+ * synthesised speech to a WAV file.
  *
  * Standard: C99
  */
