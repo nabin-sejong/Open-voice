@@ -19,9 +19,9 @@
 /* -------------------------------------------------------------------------
  * Parameter bounds (eSpeak NG ranges)
  * ---------------------------------------------------------------------- */
-#define PITCH_MIN    0
-#define PITCH_MAX    99
-#define PITCH_DEF    50
+#define PITCH_MIN   -10   /* semitones below neutral */
+#define PITCH_MAX    10   /* semitones above neutral */
+#define PITCH_DEF     0   /* neutral (SSML +0st)     */
 
 #define SPEED_MIN    80
 #define SPEED_MAX    450
@@ -42,7 +42,7 @@
  * Profile - stores all user-configurable voice synthesis parameters.
  */
 typedef struct {
-    int  pitch;              /**< Pitch:  0-99  (eSpeak -p flag)          */
+    int  pitch;              /**< Pitch: -10 to +10 semitones (SSML F0)   */
     int  speed;              /**< Speed:  80-450 words per minute          */
     int  volume;             /**< Volume: 0-200 (100 = default)            */
     char language[LANG_TAG_LEN]; /**< eSpeak language tag, e.g. "en-us"   */
