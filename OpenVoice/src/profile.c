@@ -138,13 +138,13 @@ int profile_save(const Profile *p, const char *path)
     fprintf(fp, "# OpenVoice Voice Profile\n");
     fprintf(fp, "# Edit this file or use the Voice Settings menu.\n");
     fprintf(fp, "#\n");
-    fprintf(fp, "# pitch:    %d - %d  (default %d)\n",
+    fprintf(fp, "# pitch:    %d to %+d  (semitones, default %+d = neutral F0)\n",
             PITCH_MIN, PITCH_MAX, PITCH_DEF);
     fprintf(fp, "# speed:    %d - %d  (default %d, words per minute)\n",
             SPEED_MIN, SPEED_MAX, SPEED_DEF);
     fprintf(fp, "# volume:   %d - %d  (default %d)\n",
             VOLUME_MIN, VOLUME_MAX, VOLUME_DEF);
-    fprintf(fp, "# language: eSpeak NG language tag (e.g. en-us, en-gb, fr, de)\n");
+    fprintf(fp, "# language: BCP 47 language tag for SAPI voice (e.g. en-us, en-gb, fr, de)\n");
     fprintf(fp, "\n");
     fprintf(fp, "pitch=%d\n",    p->pitch);
     fprintf(fp, "speed=%d\n",    p->speed);
@@ -154,3 +154,4 @@ int profile_save(const Profile *p, const char *path)
     fclose(fp);
     return 0;
 }
+
