@@ -11,20 +11,10 @@ set(CMAKE_C_EXTENSIONS OFF)
 # ---------------------------------------------------------------------------
 # Compiler warnings
 # ---------------------------------------------------------------------------
-add_compile_options(
-    -Wall
-    -Wextra
-    -Wpedantic
-    -D_POSIX_C_SOURCE=200809L
-)
+add_compile_options(-Wall -Wextra -Wpedantic)
 
 # ---------------------------------------------------------------------------
-# Find required libraries
-# ---------------------------------------------------------------------------
-find_package(Curses REQUIRED)
-
-# ---------------------------------------------------------------------------
-# Main application
+# Main application  (Windows Console API — no external libraries needed)
 # ---------------------------------------------------------------------------
 set(SOURCES
     src/main.c
@@ -39,10 +29,7 @@ add_executable(openvoice ${SOURCES})
 
 target_include_directories(openvoice PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CURSES_INCLUDE_DIR}
 )
-
-target_link_libraries(openvoice PRIVATE ${CURSES_LIBRARIES})
 
 # ---------------------------------------------------------------------------
 # Install rules
@@ -51,11 +38,10 @@ install(TARGETS openvoice RUNTIME DESTINATION bin)
 install(DIRECTORY data/ DESTINATION share/openvoice/data)
 
 # ---------------------------------------------------------------------------
-# Unit tests
+# Unit tests  (no UI dependency — compile cleanly without windows.h tricks)
 # ---------------------------------------------------------------------------
 enable_testing()
 
-# test_profile
 add_executable(test_profile
     tests/test_profile.c
     src/profile.c
@@ -65,7 +51,6 @@ target_include_directories(test_profile PRIVATE
 )
 add_test(NAME ProfileTests COMMAND test_profile)
 
-# test_phrase
 add_executable(test_phrase
     tests/test_phrase.c
     src/phrase.c
@@ -75,7 +60,6 @@ target_include_directories(test_phrase PRIVATE
 )
 add_test(NAME PhraseTests COMMAND test_phrase)
 
-# test_speech
 add_executable(test_speech
     tests/test_speech.c
     src/speech.c
@@ -93,5 +77,5 @@ message(STATUS "")
 message(STATUS "  OpenVoice ${PROJECT_VERSION} configuration:")
 message(STATUS "    C Standard : C${CMAKE_C_STANDARD}")
 message(STATUS "    Build type : ${CMAKE_BUILD_TYPE}")
-message(STATUS "    ncurses    : ${CURSES_LIBRARIES}")
+message(STATUS "    TTS engine : Windows SAPI (built-in)")
 message(STATUS "")
