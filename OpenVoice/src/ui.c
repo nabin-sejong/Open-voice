@@ -1,110 +1,245 @@
 /*
  * OpenVoice AAC Communicator
- * src/ui.c - ncurses User Interface Implementation
+ * src/ui.c - Windows Console User Interface
  *
- * Implements the terminal UI: main menu, phrase board, voice-settings
- * editor, text-input box, modal dialogues, and info screens.
+ * Uses the Windows Console API directly so the binary runs on any
+ * Windows machine without additional installs.
  *
- * Standard: C99
+ * Standard: C99 + Windows SDK
  */
 
-#include <ncurses.h>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <stdio.h>
+#include <stdarg.h>
 
 #include "../include/ui.h"
 #include "../include/phrase.h"
 #include "../include/profile.h"
 
-/* -------------------------------------------------------------------------
- * Internal colour-pair IDs
- * ---------------------------------------------------------------------- */
-#define CP_NORMAL       1   /* white on dark blue  - default text          */
-#define CP_HIGHLIGHT    2   /* black on bright cyan - selected item        */
-#define CP_TITLE        3   /* bright yellow on dark blue - headers        */
-#define CP_BORDER       4   /* bright white on dark blue - box borders     */
-#define CP_STATUS       5   /* black on bright green - status bar          */
-#define CP_ERROR        6   /* bright white on red - error messages        */
-#define CP_PHRASE       7   /* black on bright white - phrase button       */
-#define CP_PHRASE_SEL   8   /* bright white on dark magenta - selected btn */
-#define CP_SLIDER       9   /* black on yellow - slider track              */
+/* ---- console handles --------------------------------------------------- */
+static HANDLE hOut;
+static HANDLE hIn;
+static DWORD  g_orig_in_mode;
+static WORD   g_orig_attr;
 
-/* -------------------------------------------------------------------------
- * Helpers
- * ---------------------------------------------------------------------- */
+/* ---- colour attributes -------------------------------------------------- */
+#define ATTR_NORMAL    (FOREGROUND_RED|FOREGROUND_GREEN|FOREGROUND_BLUE \
+                        | BACKGROUND_BLUE)
+#define ATTR_HIGHLIGHT (FOREGROUND_INTENSITY \
+                        | BACKGROUND_GREEN|BACKGROUND_BLUE)
+#define ATTR_TITLE     (FOREGROUND_RED|FOREGROUND_GREEN|FOREGROUND_INTENSITY \
+                        | BACKGROUND_BLUE)
+#define ATTR_BORDER    (FOREGROUND_RED|FOREGROUND_GREEN|FOREGROUND_BLUE \
+                        | FOREGROUND_INTENSITY | BACKGROUND_BLUE)
+#define ATTR_STATUS    (BACKGROUND_GREEN | FOREGROUND_INTENSITY)
+#define ATTR_PHRASE    (BACKGROUND_RED|BACKGROUND_GREEN|BACKGROUND_BLUE \
+                        | BACKGROUND_INTENSITY)
+#define ATTR_PHRASE_SEL (FOREGROUND_RED|FOREGROUND_GREEN|FOREGROUND_BLUE \
+                         | FOREGROUND_INTENSITY \
+                         | BACKGROUND_RED|BACKGROUND_BLUE)
+#define ATTR_SLIDER    (BACKGROUND_RED|BACKGROUND_GREEN|BACKGROUND_INTENSITY)
 
-/** Draw a centred string on the given row using current attributes. */
-static void draw_centered(WINDOW *win, int row, const char *text)
+/* ---- logical key codes (above ASCII range) ------------------------------ */
+#define K_UP    0x0100
+#define K_DOWN  0x0101
+#define K_LEFT  0x0102
+#define K_RIGHT 0x0103
+#define K_ENTER 0x0104
+#define K_ESC   0x0105
+#define K_BKSP  0x0106
+#define K_DEL   0x0107
+#define K_HOME  0x0108
+#define K_END   0x0109
+
+/* =========================================================================
+ * Low-level console primitives
+ * ====================================================================== */
+
+static void con_get_size(int *w, int *h)
 {
-    int w = getmaxx(win);
-    int len = (int)strlen(text);
-    int col = (w - len) / 2;
-    if (col < 0) col = 0;
-    mvwprintw(win, row, col, "%s", text);
+    CONSOLE_SCREEN_BUFFER_INFO i;
+    GetConsoleScreenBufferInfo(hOut, &i);
+    *w = i.srWindow.Right  - i.srWindow.Left + 1;
+    *h = i.srWindow.Bottom - i.srWindow.Top  + 1;
 }
 
-/** Draw a box with a coloured title bar. */
-static void draw_titled_box(WINDOW *win, const char *title)
+static void con_move(int x, int y)
 {
-    wattron(win, COLOR_PAIR(CP_BORDER));
-    box(win, 0, 0);
-    wattroff(win, COLOR_PAIR(CP_BORDER));
-
-    wattron(win, COLOR_PAIR(CP_TITLE) | A_BOLD);
-    draw_centered(win, 0, title);
-    wattroff(win, COLOR_PAIR(CP_TITLE) | A_BOLD);
+    COORD c = { (SHORT)x, (SHORT)y };
+    SetConsoleCursorPosition(hOut, c);
 }
 
-/** Draw a status-bar footer centred in the last row of win. */
-static void draw_footer(WINDOW *win, const char *text)
+static void con_attr(WORD a)
 {
-    int rows = getmaxy(win);
-    wattron(win, COLOR_PAIR(CP_STATUS) | A_BOLD);
-    mvwhline(win, rows - 1, 1, ' ', getmaxx(win) - 2);
-    draw_centered(win, rows - 1, text);
-    wattroff(win, COLOR_PAIR(CP_STATUS) | A_BOLD);
+    SetConsoleTextAttribute(hOut, a);
 }
 
-/* -------------------------------------------------------------------------
- * ui_init
- * ---------------------------------------------------------------------- */
+static void con_str(int x, int y, WORD a, const char *s)
+{
+    con_move(x, y);
+    con_attr(a);
+    DWORD wr;
+    WriteConsoleA(hOut, s, (DWORD)strlen(s), &wr, NULL);
+}
+
+static void con_printf(int x, int y, WORD a, const char *fmt, ...)
+{
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    con_str(x, y, a, buf);
+}
+
+static void con_fill(int x, int y, int w, WORD a, char ch)
+{
+    if (w <= 0) return;
+    COORD pos = { (SHORT)x, (SHORT)y };
+    DWORD wr;
+    FillConsoleOutputAttribute(hOut, a, (DWORD)w, pos, &wr);
+    FillConsoleOutputCharacterA(hOut, ch, (DWORD)w, pos, &wr);
+}
+
+static void con_clear_rect(int x, int y, int w, int h, WORD a)
+{
+    for (int r = 0; r < h; r++)
+        con_fill(x, y + r, w, a, ' ');
+}
+
+static void con_cursor(int visible)
+{
+    CONSOLE_CURSOR_INFO ci;
+    GetConsoleCursorInfo(hOut, &ci);
+    ci.bVisible = visible ? TRUE : FALSE;
+    SetConsoleCursorInfo(hOut, &ci);
+}
+
+/* =========================================================================
+ * Drawing helpers
+ * ====================================================================== */
+
+static void draw_box(int x, int y, int w, int h, WORD a)
+{
+    /* top */
+    con_fill(x, y, w, a, '-');
+    con_str(x,     y, a, "+");
+    con_str(x+w-1, y, a, "+");
+    /* bottom */
+    con_fill(x, y+h-1, w, a, '-');
+    con_str(x,     y+h-1, a, "+");
+    con_str(x+w-1, y+h-1, a, "+");
+    /* sides */
+    for (int r = y+1; r < y+h-1; r++) {
+        con_str(x,     r, a, "|");
+        con_str(x+w-1, r, a, "|");
+    }
+}
+
+static void draw_titled_box(int x, int y, int w, int h, const char *title)
+{
+    con_clear_rect(x, y, w, h, ATTR_NORMAL);
+    draw_box(x, y, w, h, ATTR_BORDER);
+    int tlen = (int)strlen(title);
+    int tx = x + (w - tlen) / 2;
+    if (tx < x+1) tx = x+1;
+    con_str(tx, y, ATTR_TITLE, title);
+}
+
+static void draw_footer(int x, int y, int w, const char *text)
+{
+    con_fill(x+1, y, w-2, ATTR_STATUS, ' ');
+    int tlen = (int)strlen(text);
+    int tx = x + (w - tlen) / 2;
+    if (tx < x+1) tx = x+1;
+    con_str(tx, y, ATTR_STATUS, text);
+}
+
+/* Draw text centred within a box starting at (box_x, row) of width box_w. */
+static void draw_centered(int box_x, int row, int box_w, WORD a,
+                           const char *text)
+{
+    int tlen = (int)strlen(text);
+    int tx = box_x + (box_w - tlen) / 2;
+    if (tx < box_x) tx = box_x;
+    con_str(tx, row, a, text);
+}
+
+/* =========================================================================
+ * Input
+ * ====================================================================== */
+
+static int read_key(void)
+{
+    INPUT_RECORD ir;
+    DWORD read;
+    while (1) {
+        ReadConsoleInputA(hIn, &ir, 1, &read);
+        if (ir.EventType != KEY_EVENT || !ir.Event.KeyEvent.bKeyDown)
+            continue;
+        WORD vk = ir.Event.KeyEvent.wVirtualKeyCode;
+        char ch = ir.Event.KeyEvent.uChar.AsciiChar;
+        switch (vk) {
+            case VK_UP:     return K_UP;
+            case VK_DOWN:   return K_DOWN;
+            case VK_LEFT:   return K_LEFT;
+            case VK_RIGHT:  return K_RIGHT;
+            case VK_RETURN: return K_ENTER;
+            case VK_ESCAPE: return K_ESC;
+            case VK_BACK:   return K_BKSP;
+            case VK_DELETE: return K_DEL;
+            case VK_HOME:   return K_HOME;
+            case VK_END:    return K_END;
+            default:
+                if (ch >= 32 && (unsigned char)ch < 127)
+                    return (int)(unsigned char)ch;
+                break;
+        }
+    }
+}
+
+/* =========================================================================
+ * Public API
+ * ====================================================================== */
+
 void ui_init(void)
 {
-    initscr();
-    cbreak();
-    noecho();
-    keypad(stdscr, TRUE);
-    curs_set(0);
-    start_color();
-    use_default_colors();
+    hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    hIn  = GetStdHandle(STD_INPUT_HANDLE);
 
-    /* High-contrast colour scheme */
-    init_pair(CP_NORMAL,     COLOR_WHITE,   COLOR_BLUE);
-    init_pair(CP_HIGHLIGHT,  COLOR_BLACK,   COLOR_CYAN);
-    init_pair(CP_TITLE,      COLOR_YELLOW,  COLOR_BLUE);
-    init_pair(CP_BORDER,     COLOR_WHITE,   COLOR_BLUE);
-    init_pair(CP_STATUS,     COLOR_BLACK,   COLOR_GREEN);
-    init_pair(CP_ERROR,      COLOR_WHITE,   COLOR_RED);
-    init_pair(CP_PHRASE,     COLOR_BLACK,   COLOR_WHITE);
-    init_pair(CP_PHRASE_SEL, COLOR_WHITE,   COLOR_MAGENTA);
-    init_pair(CP_SLIDER,     COLOR_BLACK,   COLOR_YELLOW);
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    GetConsoleScreenBufferInfo(hOut, &csbi);
+    g_orig_attr = csbi.wAttributes;
 
-    bkgd(COLOR_PAIR(CP_NORMAL));
-    refresh();
+    GetConsoleMode(hIn, &g_orig_in_mode);
+    SetConsoleMode(hIn, ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT);
+
+    SetConsoleTitleA("OpenVoice AAC Communicator");
+    con_cursor(0);
+
+    int w, h;
+    con_get_size(&w, &h);
+    con_clear_rect(0, 0, w, h, ATTR_NORMAL);
 }
 
-/* -------------------------------------------------------------------------
- * ui_cleanup
- * ---------------------------------------------------------------------- */
 void ui_cleanup(void)
 {
-    endwin();
+    int w, h;
+    con_get_size(&w, &h);
+    con_clear_rect(0, 0, w, h, g_orig_attr);
+    con_attr(g_orig_attr);
+    con_move(0, 0);
+    con_cursor(1);
+    SetConsoleMode(hIn, g_orig_in_mode);
 }
 
-/* -------------------------------------------------------------------------
+/* =========================================================================
  * ui_main_menu
- * ---------------------------------------------------------------------- */
+ * ====================================================================== */
+
 int ui_main_menu(void)
 {
     static const char *items[MENU_ITEM_COUNT] = {
@@ -115,7 +250,6 @@ int ui_main_menu(void)
         "  5.  About          ",
         "  6.  Exit           "
     };
-
     static const char *subtitles[MENU_ITEM_COUNT] = {
         "Speak any text you type",
         "Choose from common AAC phrases",
@@ -125,90 +259,67 @@ int ui_main_menu(void)
         "Quit the application"
     };
 
-    int rows, cols;
-    getmaxyx(stdscr, rows, cols);
+    int cw, ch;
+    con_get_size(&cw, &ch);
 
-    /* Panel dimensions */
     int box_h = MENU_ITEM_COUNT + 10;
     int box_w = 52;
-    int box_y = (rows - box_h) / 2;
-    int box_x = (cols - box_w) / 2;
-    if (box_y < 0) box_y = 0;
-    if (box_x < 0) box_x = 0;
-
-    WINDOW *win = newwin(box_h, box_w, box_y, box_x);
-    keypad(win, TRUE);
-    wbkgd(win, COLOR_PAIR(CP_NORMAL));
+    int box_y = (ch - box_h) / 2; if (box_y < 0) box_y = 0;
+    int box_x = (cw - box_w) / 2; if (box_x < 0) box_x = 0;
 
     int selection = 0;
+    int dirty = 1;
 
     while (1) {
-        werase(win);
-        draw_titled_box(win, "[ OPENVOICE AAC COMMUNICATOR ]");
+        if (dirty) {
+            draw_titled_box(box_x, box_y, box_w, box_h,
+                            "[ OPENVOICE AAC COMMUNICATOR ]");
 
-        /* Logo / tagline */
-        wattron(win, COLOR_PAIR(CP_TITLE) | A_BOLD);
-        draw_centered(win, 2, "OpenVoice");
-        wattroff(win, COLOR_PAIR(CP_TITLE) | A_BOLD);
+            draw_centered(box_x, box_y+2, box_w,
+                          ATTR_TITLE | FOREGROUND_INTENSITY, "OpenVoice");
+            draw_centered(box_x, box_y+3, box_w,
+                          ATTR_NORMAL, "AAC System for Speech Impairments");
+            con_fill(box_x+1, box_y+4, box_w-2, ATTR_BORDER, '-');
 
-        wattron(win, COLOR_PAIR(CP_NORMAL));
-        draw_centered(win, 3, "AAC System for Speech Impairments");
-        wattroff(win, COLOR_PAIR(CP_NORMAL));
-
-        /* Separator */
-        wattron(win, COLOR_PAIR(CP_BORDER));
-        mvwhline(win, 4, 1, ACS_HLINE, box_w - 2);
-        wattroff(win, COLOR_PAIR(CP_BORDER));
-
-        /* Menu items */
-        for (int i = 0; i < MENU_ITEM_COUNT; i++) {
-            if (i == selection) {
-                wattron(win, COLOR_PAIR(CP_HIGHLIGHT) | A_BOLD);
-                mvwprintw(win, 5 + i, 3, "%-44s", items[i]);
-                wattroff(win, COLOR_PAIR(CP_HIGHLIGHT) | A_BOLD);
-            } else {
-                wattron(win, COLOR_PAIR(CP_NORMAL));
-                mvwprintw(win, 5 + i, 3, "%-44s", items[i]);
-                wattroff(win, COLOR_PAIR(CP_NORMAL));
+            for (int i = 0; i < MENU_ITEM_COUNT; i++) {
+                WORD a = (i == selection) ? ATTR_HIGHLIGHT : ATTR_NORMAL;
+                char padded[50];
+                snprintf(padded, sizeof(padded), "%-44s", items[i]);
+                con_str(box_x+3, box_y+5+i, a, padded);
             }
+
+            con_fill(box_x+1, box_y+5+MENU_ITEM_COUNT, box_w-2, ATTR_BORDER, '-');
+
+            char sub[52];
+            snprintf(sub, sizeof(sub), "%-48s", subtitles[selection]);
+            con_str(box_x+2, box_y+6+MENU_ITEM_COUNT, ATTR_TITLE, sub);
+
+            draw_footer(box_x, box_y+box_h-1, box_w,
+                        " UP/DOWN: Navigate   ENTER: Select ");
+            dirty = 0;
         }
 
-        /* Separator */
-        wattron(win, COLOR_PAIR(CP_BORDER));
-        mvwhline(win, 5 + MENU_ITEM_COUNT, 1, ACS_HLINE, box_w - 2);
-        wattroff(win, COLOR_PAIR(CP_BORDER));
-
-        /* Subtitle for highlighted item */
-        wattron(win, COLOR_PAIR(CP_TITLE));
-        mvwprintw(win, 6 + MENU_ITEM_COUNT, 2, "%-48s",
-                  subtitles[selection]);
-        wattroff(win, COLOR_PAIR(CP_TITLE));
-
-        draw_footer(win, " UP/DOWN: Navigate   ENTER: Select ");
-
-        wrefresh(win);
-
-        int ch = wgetch(win);
-        switch (ch) {
-            case KEY_UP:
+        int key = read_key();
+        switch (key) {
+            case K_UP:
                 selection = (selection - 1 + MENU_ITEM_COUNT) % MENU_ITEM_COUNT;
+                dirty = 1;
                 break;
-            case KEY_DOWN:
+            case K_DOWN:
                 selection = (selection + 1) % MENU_ITEM_COUNT;
+                dirty = 1;
                 break;
-            case '\n':
-            case KEY_ENTER:
-                delwin(win);
+            case K_ENTER:
                 return selection;
-            case '1': delwin(win); return MENU_TYPE_MESSAGE;
-            case '2': delwin(win); return MENU_QUICK_PHRASES;
-            case '3': delwin(win); return MENU_VOICE_SETTINGS;
-            case '4': delwin(win); return MENU_EXPORT_WAV;
-            case '5': delwin(win); return MENU_ABOUT;
+            case '1': return MENU_TYPE_MESSAGE;
+            case '2': return MENU_QUICK_PHRASES;
+            case '3': return MENU_VOICE_SETTINGS;
+            case '4': return MENU_EXPORT_WAV;
+            case '5': return MENU_ABOUT;
             case '6':
             case 'q':
             case 'Q':
-                delwin(win);
+            case K_ESC:
                 return MENU_EXIT;
             default:
                 break;
@@ -216,105 +327,89 @@ int ui_main_menu(void)
     }
 }
 
-/* -------------------------------------------------------------------------
+/* =========================================================================
  * ui_phrase_board
- * ---------------------------------------------------------------------- */
+ * ====================================================================== */
+
 int ui_phrase_board(const PhraseList *phrases)
 {
-    if (!phrases || phrases->count == 0)
-        return -1;
+    if (!phrases || phrases->count == 0) return -1;
 
-    int rows, cols;
-    getmaxyx(stdscr, rows, cols);
+    int cw, ch;
+    con_get_size(&cw, &ch);
 
-    /* Up to 4 columns */
     int ncols = 4;
     if (phrases->count < ncols) ncols = phrases->count;
-    int btn_w  = 18;
-    int btn_h  = 3;
-    int pad    = 2;
-    int nrows  = (phrases->count + ncols - 1) / ncols;
+    int btn_w = 20;   /* wide enough for "I Don't Understand" (18 chars) */
+    int btn_h = 3;
+    int pad   = 2;
+    int nrows = (phrases->count + ncols - 1) / ncols;
 
-    int box_w  = ncols * (btn_w + pad) + pad + 2;
-    int box_h  = nrows * (btn_h + 1) + 6;
-    if (box_h > rows - 2) box_h = rows - 2;
-    if (box_w > cols - 2) box_w = cols - 2;
+    int box_w = ncols * (btn_w + pad) + pad + 2;
+    int box_h = nrows * (btn_h + 1) + 6;
+    if (box_h > ch - 2) box_h = ch - 2;
+    if (box_w > cw - 2) box_w = cw - 2;
 
-    int box_y  = (rows - box_h) / 2;
-    int box_x  = (cols - box_w) / 2;
-    if (box_y < 0) box_y = 0;
-    if (box_x < 0) box_x = 0;
-
-    WINDOW *win = newwin(box_h, box_w, box_y, box_x);
-    keypad(win, TRUE);
-    wbkgd(win, COLOR_PAIR(CP_NORMAL));
+    int box_y = (ch - box_h) / 2; if (box_y < 0) box_y = 0;
+    int box_x = (cw - box_w) / 2; if (box_x < 0) box_x = 0;
 
     int selection = 0;
+    int dirty = 1;
 
     while (1) {
-        werase(win);
-        draw_titled_box(win, "[ QUICK PHRASE BOARD ]");
-        draw_footer(win, " Arrows: Navigate   ENTER: Speak   ESC: Back ");
+        if (dirty) {
+            draw_titled_box(box_x, box_y, box_w, box_h,
+                            "[ QUICK PHRASE BOARD ]");
+            draw_footer(box_x, box_y+box_h-1, box_w,
+                        " Arrows: Navigate   ENTER: Speak   ESC: Back ");
 
-        for (int i = 0; i < phrases->count; i++) {
-            int r   = i / ncols;
-            int c   = i % ncols;
-            int y   = 2 + r * (btn_h + 1);
-            int x   = 1 + pad + c * (btn_w + pad);
+            for (int i = 0; i < phrases->count; i++) {
+                int r  = i / ncols;
+                int c  = i % ncols;
+                int bx = box_x + 1 + pad + c * (btn_w + pad);
+                int by = box_y + 2 + r * (btn_h + 1);
 
-            if (y + btn_h >= box_h - 1) break; /* out of visible area */
+                if (by + btn_h >= box_y + box_h - 1) break;
 
-            WINDOW *btn = derwin(win, btn_h, btn_w, y, x);
-            if (!btn) continue;
+                WORD a = (i == selection) ? ATTR_PHRASE_SEL : ATTR_PHRASE;
 
-            if (i == selection) {
-                wbkgd(btn, COLOR_PAIR(CP_PHRASE_SEL));
-                wattron(btn, COLOR_PAIR(CP_PHRASE_SEL) | A_BOLD);
-            } else {
-                wbkgd(btn, COLOR_PAIR(CP_PHRASE));
-                wattron(btn, COLOR_PAIR(CP_PHRASE));
+                /* button outline */
+                con_fill(bx,       by,   btn_w, a, '-');
+                con_str(bx,        by,   a, "+");
+                con_str(bx+btn_w-1,by,   a, "+");
+                con_fill(bx,       by+1, btn_w, a, ' ');
+                con_str(bx,        by+1, a, "|");
+                con_str(bx+btn_w-1,by+1, a, "|");
+                con_fill(bx,       by+2, btn_w, a, '-');
+                con_str(bx,        by+2, a, "+");
+                con_str(bx+btn_w-1,by+2, a, "+");
+
+                /* phrase text */
+                char label[22];
+                snprintf(label, sizeof(label), "%-*.*s",
+                         btn_w-2, btn_w-2, phrases->items[i].text);
+                con_str(bx+1, by+1, a, label);
             }
-
-            werase(btn);
-            box(btn, 0, 0);
-
-            /* Truncate phrase text to fit button width */
-            char label[20];
-            snprintf(label, sizeof(label), "%-*.*s",
-                     btn_w - 2, btn_w - 2, phrases->items[i].text);
-            mvwprintw(btn, 1, 1, "%s", label);
-
-            if (i == selection)
-                wattroff(btn, COLOR_PAIR(CP_PHRASE_SEL) | A_BOLD);
-            else
-                wattroff(btn, COLOR_PAIR(CP_PHRASE));
-
-            wrefresh(btn);
-            delwin(btn);
+            dirty = 0;
         }
 
-        wrefresh(win);
-
-        int ch = wgetch(win);
-        switch (ch) {
-            case KEY_LEFT:
-                if (selection > 0) selection--;
+        int key = read_key();
+        switch (key) {
+            case K_LEFT:
+                if (selection > 0) { selection--; dirty = 1; }
                 break;
-            case KEY_RIGHT:
-                if (selection < phrases->count - 1) selection++;
+            case K_RIGHT:
+                if (selection < phrases->count - 1) { selection++; dirty = 1; }
                 break;
-            case KEY_UP:
-                if (selection - ncols >= 0) selection -= ncols;
+            case K_UP:
+                if (selection - ncols >= 0) { selection -= ncols; dirty = 1; }
                 break;
-            case KEY_DOWN:
-                if (selection + ncols < phrases->count) selection += ncols;
+            case K_DOWN:
+                if (selection + ncols < phrases->count) { selection += ncols; dirty = 1; }
                 break;
-            case '\n':
-            case KEY_ENTER:
-                delwin(win);
+            case K_ENTER:
                 return selection;
-            case 27: /* ESC */
-                delwin(win);
+            case K_ESC:
                 return -1;
             default:
                 break;
@@ -322,113 +417,102 @@ int ui_phrase_board(const PhraseList *phrases)
     }
 }
 
-/* -------------------------------------------------------------------------
+/* =========================================================================
  * ui_voice_settings
- * ---------------------------------------------------------------------- */
+ * ====================================================================== */
+
 void ui_voice_settings(Profile *profile)
 {
-    int rows, cols;
-    getmaxyx(stdscr, rows, cols);
+    int cw, ch;
+    con_get_size(&cw, &ch);
 
     int box_h = 18;
-    int box_w = 56;
-    int box_y = (rows - box_h) / 2;
-    int box_x = (cols - box_w) / 2;
-    if (box_y < 0) box_y = 0;
-    if (box_x < 0) box_x = 0;
+    int box_w = 60;   /* 60 gives 58-char interior — fits the 55-char footer */
+    int box_y = (ch - box_h) / 2; if (box_y < 0) box_y = 0;
+    int box_x = (cw - box_w) / 2; if (box_x < 0) box_x = 0;
 
-    WINDOW *win = newwin(box_h, box_w, box_y, box_x);
-    keypad(win, TRUE);
-    wbkgd(win, COLOR_PAIR(CP_NORMAL));
+    /* Snapshot so ESC can restore original values */
+    Profile backup = *profile;
 
-    /* Parameters: label, pointer, min, max, step */
-    typedef struct { const char *label; int *val; int lo; int hi; int step; } Param;
+    typedef struct {
+        const char *label; int *val; int lo; int hi; int step;
+    } Param;
+
     Param params[3] = {
-        { "Pitch  ", &profile->pitch,  PITCH_MIN,  PITCH_MAX,  5  },
-        { "Speed  ", &profile->speed,  SPEED_MIN,  SPEED_MAX,  10 },
-        { "Volume ", &profile->volume, VOLUME_MIN, VOLUME_MAX, 10 }
+        { "Pitch(st)", &profile->pitch,  PITCH_MIN,  PITCH_MAX,  1  },
+        { "Speed    ", &profile->speed,  SPEED_MIN,  SPEED_MAX,  10 },
+        { "Volume   ", &profile->volume, VOLUME_MIN, VOLUME_MAX, 10 }
     };
     int nparams = 3;
-    int sel     = 0;
+    int sel   = 0;
+    int dirty = 1;
 
     while (1) {
-        werase(win);
-        draw_titled_box(win, "[ VOICE SETTINGS ]");
-        draw_footer(win, " UP/DN: Select  LEFT/RIGHT: Adjust  S: Save  ESC: Back ");
+        if (dirty) {
+            draw_titled_box(box_x, box_y, box_w, box_h, "[ VOICE SETTINGS ]");
+            draw_footer(box_x, box_y+box_h-1, box_w,
+                        " UP/DN: Select  LEFT/RIGHT: Adjust  S: Save  ESC: Back ");
 
-        for (int i = 0; i < nparams; i++) {
-            int y = 3 + i * 4;
-
-            /* Parameter label */
-            if (i == sel)
-                wattron(win, COLOR_PAIR(CP_HIGHLIGHT) | A_BOLD);
-            else
-                wattron(win, COLOR_PAIR(CP_TITLE) | A_BOLD);
-
-            mvwprintw(win, y, 3, "%s", params[i].label);
-
-            if (i == sel)
-                wattroff(win, COLOR_PAIR(CP_HIGHLIGHT) | A_BOLD);
-            else
-                wattroff(win, COLOR_PAIR(CP_TITLE) | A_BOLD);
-
-            /* Numeric value */
-            wattron(win, COLOR_PAIR(CP_NORMAL) | A_BOLD);
-            mvwprintw(win, y, 12, "%3d", *params[i].val);
-            wattroff(win, COLOR_PAIR(CP_NORMAL) | A_BOLD);
-
-            /* Slider bar */
             int bar_w = box_w - 20;
-            int filled = (int)(((double)(*params[i].val - params[i].lo) /
-                                (params[i].hi - params[i].lo)) * bar_w);
 
-            mvwprintw(win, y + 1, 3, "[");
-            for (int j = 0; j < bar_w; j++) {
-                if (j < filled) {
-                    wattron(win, COLOR_PAIR(CP_SLIDER) | A_BOLD);
-                    waddch(win, '=');
-                    wattroff(win, COLOR_PAIR(CP_SLIDER) | A_BOLD);
-                } else {
-                    wattron(win, COLOR_PAIR(CP_NORMAL));
-                    waddch(win, '-');
-                    wattroff(win, COLOR_PAIR(CP_NORMAL));
+            for (int i = 0; i < nparams; i++) {
+                int y = box_y + 3 + i * 4;
+
+                WORD la = (i == sel)
+                          ? ATTR_HIGHLIGHT
+                          : (ATTR_TITLE | FOREGROUND_INTENSITY);
+                con_printf(box_x+3, y, la, "%s", params[i].label);
+                con_printf(box_x+12, y, ATTR_NORMAL, "%3d", *params[i].val);
+
+                int filled = (int)(
+                    ((double)(*params[i].val - params[i].lo)
+                    / (params[i].hi - params[i].lo)) * bar_w);
+
+                con_str(box_x+3, y+1, ATTR_NORMAL, "[");
+                if (filled > 0)
+                    con_fill(box_x+4, y+1, filled, ATTR_SLIDER, '=');
+                if (filled < bar_w)
+                    con_fill(box_x+4+filled, y+1, bar_w-filled, ATTR_NORMAL, '-');
+                con_str(box_x+4+bar_w, y+1, ATTR_NORMAL, "]");
+
+                /* Scale hint under the pitch slider only */
+                if (i == 0) {
+                    con_printf(box_x+3, y+2, ATTR_TITLE,
+                               "  -10st <------ F0 pitch ------> +10st  ");
                 }
             }
-            mvwprintw(win, y + 1, 3 + bar_w + 1, "]");
+
+            con_printf(box_x+3, box_y+3+nparams*4+1, ATTR_TITLE,
+                       "Language: %s", profile->language);
+
+            dirty = 0;
         }
 
-        /* Language display */
-        wattron(win, COLOR_PAIR(CP_TITLE) | A_BOLD);
-        mvwprintw(win, 3 + nparams * 4 + 1, 3, "Language: %s", profile->language);
-        wattroff(win, COLOR_PAIR(CP_TITLE) | A_BOLD);
-
-        wrefresh(win);
-
-        int ch = wgetch(win);
-        switch (ch) {
-            case KEY_UP:
-                sel = (sel - 1 + nparams) % nparams;
-                break;
-            case KEY_DOWN:
-                sel = (sel + 1) % nparams;
-                break;
-            case KEY_RIGHT:
+        int key = read_key();
+        switch (key) {
+            case K_UP:
+                sel = (sel - 1 + nparams) % nparams; dirty = 1; break;
+            case K_DOWN:
+                sel = (sel + 1) % nparams; dirty = 1; break;
+            case K_RIGHT:
                 *params[sel].val += params[sel].step;
                 if (*params[sel].val > params[sel].hi)
                     *params[sel].val = params[sel].hi;
+                dirty = 1;
                 break;
-            case KEY_LEFT:
+            case K_LEFT:
                 *params[sel].val -= params[sel].step;
                 if (*params[sel].val < params[sel].lo)
                     *params[sel].val = params[sel].lo;
+                dirty = 1;
                 break;
             case 's':
             case 'S':
-                /* Save handled by caller after return */
-                delwin(win);
+                ui_show_message("[ SAVED ]",
+                    "Voice settings saved successfully.");
                 return;
-            case 27: /* ESC */
-                delwin(win);
+            case K_ESC:
+                *profile = backup;   /* discard changes */
                 return;
             default:
                 break;
@@ -436,125 +520,94 @@ void ui_voice_settings(Profile *profile)
     }
 }
 
-/* -------------------------------------------------------------------------
+/* =========================================================================
  * ui_get_text_input
- * ---------------------------------------------------------------------- */
+ * ====================================================================== */
+
 int ui_get_text_input(const char *prompt, char *buf, int maxlen)
 {
-    int rows, cols;
-    getmaxyx(stdscr, rows, cols);
+    int cw, ch;
+    con_get_size(&cw, &ch);
 
-    int box_w = 60;
-    int box_h = 7;
-    int box_y = (rows - box_h) / 2;
-    int box_x = (cols - box_w) / 2;
-    if (box_y < 0) box_y = 0;
-    if (box_x < 0) box_x = 0;
+    int box_w  = 60;
+    int box_h  = 7;
+    int box_y  = (ch - box_h) / 2; if (box_y < 0) box_y = 0;
+    int box_x  = (cw - box_w) / 2; if (box_x < 0) box_x = 0;
 
-    WINDOW *win = newwin(box_h, box_w, box_y, box_x);
-    keypad(win, TRUE);
-    wbkgd(win, COLOR_PAIR(CP_NORMAL));
-    curs_set(1);
+    int field_w = box_w - 4;
+    int field_x = box_x + 2;
+    int field_y = box_y + 4;
 
-    int pos = 0;       /* cursor position in buf */
-    int len = 0;       /* current string length  */
+    int pos = 0;
+    int len = 0;
     buf[0]  = '\0';
 
-    /* Input field dimensions */
-    int field_w = box_w - 4;
-    int field_x = 2;
-    int field_y = 4;
+    con_cursor(1);
 
     while (1) {
-        werase(win);
-        draw_titled_box(win, "[ INPUT ]");
-        draw_footer(win, " ENTER: Confirm   ESC: Cancel ");
+        draw_titled_box(box_x, box_y, box_w, box_h, "[ INPUT ]");
+        draw_footer(box_x, box_y+box_h-1, box_w, " ENTER: Confirm   ESC: Cancel ");
+        con_str(box_x+2, box_y+2, ATTR_TITLE, prompt);
 
-        wattron(win, COLOR_PAIR(CP_TITLE) | A_BOLD);
-        mvwprintw(win, 2, 2, "%s", prompt);
-        wattroff(win, COLOR_PAIR(CP_TITLE) | A_BOLD);
+        /* field background */
+        con_fill(field_x, field_y, field_w, ATTR_PHRASE, ' ');
 
-        /* Input field background */
-        wattron(win, COLOR_PAIR(CP_PHRASE));
-        for (int i = 0; i < field_w; i++)
-            mvwaddch(win, field_y, field_x + i, ' ');
-        wattroff(win, COLOR_PAIR(CP_PHRASE));
-
-        /* Display text (scroll left if needed) */
+        /* visible text (scroll if needed) */
         int disp_start = 0;
         if (pos >= field_w) disp_start = pos - field_w + 1;
 
-        wattron(win, COLOR_PAIR(CP_PHRASE) | A_BOLD);
-        for (int i = 0; i < field_w && disp_start + i < len; i++) {
-            mvwaddch(win, field_y, field_x + i,
-                     (unsigned char)buf[disp_start + i]);
-        }
-        wattroff(win, COLOR_PAIR(CP_PHRASE) | A_BOLD);
+        for (int i = 0; i < field_w && disp_start + i < len; i++)
+            con_fill(field_x + i, field_y, 1, ATTR_PHRASE,
+                     buf[disp_start + i]);
 
-        /* Move hardware cursor */
+        /* place hardware cursor */
         int cx = pos - disp_start;
-        if (cx < 0) cx = 0;
+        if (cx < 0)        cx = 0;
         if (cx >= field_w) cx = field_w - 1;
-        wmove(win, field_y, field_x + cx);
+        con_move(field_x + cx, field_y);
+        con_attr(ATTR_PHRASE);
 
-        wrefresh(win);
-
-        int ch = wgetch(win);
-        switch (ch) {
-            case '\n':
-            case KEY_ENTER:
+        int key = read_key();
+        switch (key) {
+            case K_ENTER:
                 buf[len] = '\0';
-                curs_set(0);
-                delwin(win);
+                con_cursor(0);
                 return UI_OK;
 
-            case 27: /* ESC */
+            case K_ESC:
                 buf[0] = '\0';
-                curs_set(0);
-                delwin(win);
+                con_cursor(0);
                 return UI_CANCEL;
 
-            case KEY_BACKSPACE:
-            case 127:
-            case '\b':
+            case K_BKSP:
                 if (pos > 0) {
-                    memmove(buf + pos - 1, buf + pos, (size_t)(len - pos));
-                    pos--;
-                    len--;
+                    memmove(buf + pos - 1, buf + pos,
+                            (size_t)(len - pos));
+                    pos--; len--;
                     buf[len] = '\0';
                 }
                 break;
 
-            case KEY_DC: /* Delete */
+            case K_DEL:
                 if (pos < len) {
-                    memmove(buf + pos, buf + pos + 1, (size_t)(len - pos - 1));
+                    memmove(buf + pos, buf + pos + 1,
+                            (size_t)(len - pos - 1));
                     len--;
                     buf[len] = '\0';
                 }
                 break;
 
-            case KEY_LEFT:
-                if (pos > 0) pos--;
-                break;
-
-            case KEY_RIGHT:
-                if (pos < len) pos++;
-                break;
-
-            case KEY_HOME:
-                pos = 0;
-                break;
-
-            case KEY_END:
-                pos = len;
-                break;
+            case K_LEFT:  if (pos > 0)   pos--; break;
+            case K_RIGHT: if (pos < len) pos++; break;
+            case K_HOME:  pos = 0;   break;
+            case K_END:   pos = len; break;
 
             default:
-                if (ch >= 32 && ch < 256 && len < maxlen - 1) {
-                    memmove(buf + pos + 1, buf + pos, (size_t)(len - pos));
-                    buf[pos] = (char)ch;
-                    pos++;
-                    len++;
+                if (key >= 32 && key < 256 && len < maxlen - 1) {
+                    memmove(buf + pos + 1, buf + pos,
+                            (size_t)(len - pos));
+                    buf[pos] = (char)key;
+                    pos++; len++;
                     buf[len] = '\0';
                 }
                 break;
@@ -562,71 +615,83 @@ int ui_get_text_input(const char *prompt, char *buf, int maxlen)
     }
 }
 
-/* -------------------------------------------------------------------------
+/* =========================================================================
+ * ui_speak_status
+ *
+ * Draws a non-blocking "Speaking…" overlay so the user knows audio is
+ * being synthesised.  Returns immediately; the caller then invokes
+ * speak_text() which blocks until playback finishes.
+ * ====================================================================== */
+
+void ui_speak_status(const char *text)
+{
+    int cw, ch;
+    con_get_size(&cw, &ch);
+
+    int box_w = 56;
+    int box_h = 6;
+    int box_y = (ch - box_h) / 2; if (box_y < 0) box_y = 0;
+    int box_x = (cw - box_w) / 2; if (box_x < 0) box_x = 0;
+
+    draw_titled_box(box_x, box_y, box_w, box_h, "[ SPEAKING ]");
+
+    /* Truncate long messages to fit inside the box */
+    char label[53];
+    snprintf(label, sizeof(label), "%-*.*s", box_w - 4, box_w - 4, text);
+
+    draw_centered(box_x, box_y + 2, box_w, ATTR_TITLE, label);
+    draw_footer(box_x, box_y + box_h - 1, box_w,
+                " Please wait \x18\x19 Synthesising audio... ");
+}
+
+/* =========================================================================
  * ui_show_message
- * ---------------------------------------------------------------------- */
+ * ====================================================================== */
+
 void ui_show_message(const char *title, const char *message)
 {
-    int rows, cols;
-    getmaxyx(stdscr, rows, cols);
+    int cw, ch;
+    con_get_size(&cw, &ch);
 
     int box_w = 50;
     int box_h = 7;
-    int box_y = (rows - box_h) / 2;
-    int box_x = (cols - box_w) / 2;
-    if (box_y < 0) box_y = 0;
-    if (box_x < 0) box_x = 0;
+    int box_y = (ch - box_h) / 2; if (box_y < 0) box_y = 0;
+    int box_x = (cw - box_w) / 2; if (box_x < 0) box_x = 0;
 
-    WINDOW *win = newwin(box_h, box_w, box_y, box_x);
-    keypad(win, TRUE);
-    wbkgd(win, COLOR_PAIR(CP_NORMAL));
+    draw_titled_box(box_x, box_y, box_w, box_h, title);
+    draw_centered(box_x, box_y+3, box_w, ATTR_NORMAL, message);
+    draw_footer(box_x, box_y+box_h-1, box_w, " Press any key to continue ");
 
-    draw_titled_box(win, title);
-    wattron(win, COLOR_PAIR(CP_NORMAL));
-    draw_centered(win, 3, message);
-    wattroff(win, COLOR_PAIR(CP_NORMAL));
-    draw_footer(win, " Press any key to continue ");
-    wrefresh(win);
-
-    wgetch(win);
-    delwin(win);
+    read_key();
 }
 
-/* -------------------------------------------------------------------------
+/* =========================================================================
  * ui_show_info_screen
- * ---------------------------------------------------------------------- */
+ * ====================================================================== */
+
 void ui_show_info_screen(const char *title, const char **lines)
 {
-    int rows, cols;
-    getmaxyx(stdscr, rows, cols);
+    int cw, ch;
+    con_get_size(&cw, &ch);
 
-    /* Count lines */
     int nlines = 0;
     while (lines[nlines]) nlines++;
 
     int box_h = nlines + 5;
     int box_w = 56;
-    if (box_h > rows - 2) box_h = rows - 2;
-    int box_y = (rows - box_h) / 2;
-    int box_x = (cols - box_w) / 2;
-    if (box_y < 0) box_y = 0;
-    if (box_x < 0) box_x = 0;
+    if (box_h > ch - 2) box_h = ch - 2;
+    int box_y = (ch - box_h) / 2; if (box_y < 0) box_y = 0;
+    int box_x = (cw - box_w) / 2; if (box_x < 0) box_x = 0;
 
-    WINDOW *win = newwin(box_h, box_w, box_y, box_x);
-    keypad(win, TRUE);
-    wbkgd(win, COLOR_PAIR(CP_NORMAL));
-
-    draw_titled_box(win, title);
-    draw_footer(win, " Press any key to return ");
+    draw_titled_box(box_x, box_y, box_w, box_h, title);
+    draw_footer(box_x, box_y+box_h-1, box_w, " Press any key to return ");
 
     for (int i = 0; i < nlines && 2 + i < box_h - 2; i++) {
-        wattron(win, COLOR_PAIR(CP_NORMAL));
-        mvwprintw(win, 2 + i, 3, "%-*.*s",
-                  box_w - 4, box_w - 4, lines[i]);
-        wattroff(win, COLOR_PAIR(CP_NORMAL));
+        char padded[64];
+        snprintf(padded, sizeof(padded), "%-*.*s", box_w-4, box_w-4, lines[i]);
+        con_str(box_x+3, box_y+2+i, ATTR_NORMAL, padded);
     }
 
-    wrefresh(win);
-    wgetch(win);
-    delwin(win);
+    read_key();
 }
+
