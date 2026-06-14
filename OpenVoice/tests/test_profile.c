@@ -30,9 +30,12 @@ static int tests_passed = 0;
 static int tests_failed = 0;
 
 #define TEST(name)     static void name(void)
-#define RUN(name)      do { printf("  %-40s", #name); \
-                            tests_run++; name();        \
-                            printf("PASS\n"); tests_passed++; } while(0)
+#define RUN(name)      do { printf("  %-40s", #name);                  \
+                            tests_run++;                                 \
+                            int _f_before = tests_failed; name();        \
+                            if (tests_failed == _f_before) {             \
+                                printf("PASS\n"); tests_passed++;        \
+                            } } while(0)
 #define ASSERT(cond)   do { if (!(cond)) {              \
     printf("FAIL\n    Assertion failed: %s (%s:%d)\n",  \
            #cond, __FILE__, __LINE__);                   \
@@ -104,11 +107,11 @@ TEST(test_profile_clamp_restores_empty_language)
 
 TEST(test_profile_save_and_load)
 {
-    const char *tmp = "/tmp/openvoice_test_profile.cfg";
+    const char *tmp = "openvoice_test_profile.cfg";
 
     Profile orig;
     profile_init(&orig);
-    orig.pitch  = 42;
+    orig.pitch  = 7;    /* in new range -10..+10 */
     orig.speed  = 200;
     orig.volume = 80;
     strncpy(orig.language, "en-gb", LANG_TAG_LEN - 1);
@@ -119,7 +122,7 @@ TEST(test_profile_save_and_load)
     profile_init(&loaded);
     ASSERT(profile_load(&loaded, tmp) == 0);
 
-    ASSERT(loaded.pitch  == 42);
+    ASSERT(loaded.pitch  == 7);
     ASSERT(loaded.speed  == 200);
     ASSERT(loaded.volume == 80);
     ASSERT(strcmp(loaded.language, "en-gb") == 0);
@@ -131,26 +134,26 @@ TEST(test_profile_load_missing_file)
 {
     Profile p;
     profile_init(&p);
-    int rc = profile_load(&p, "/tmp/this_file_does_not_exist_12345.cfg");
+    int rc = profile_load(&p, "no_such_file_openvoice_12345.cfg");
     ASSERT(rc == -1);
 }
 
 TEST(test_profile_load_partial)
 {
     /* Only pitch is present in the file; others should stay at defaults */
-    const char *tmp = "/tmp/openvoice_partial_profile.cfg";
+    const char *tmp = "openvoice_partial_profile.cfg";
 
     FILE *fp = fopen(tmp, "w");
     ASSERT(fp != NULL);
     fprintf(fp, "# comment\n");
-    fprintf(fp, "pitch=30\n");
+    fprintf(fp, "pitch=5\n");
     fclose(fp);
 
     Profile p;
     profile_init(&p);
     profile_set_defaults(&p);
     ASSERT(profile_load(&p, tmp) == 0);
-    ASSERT(p.pitch  == 30);
+    ASSERT(p.pitch  == 5);
     ASSERT(p.speed  == SPEED_DEF);
     ASSERT(p.volume == VOLUME_DEF);
 
