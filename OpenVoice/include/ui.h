@@ -1,6 +1,6 @@
 /*
  * OpenVoice AAC Communicator
- * include/ui.h - ncurses User Interface API
+ * include/ui.h - Windows Console User Interface API
  *
  * Declares all functions and constants used by the terminal UI layer.
  *
@@ -41,7 +41,7 @@
  * ---------------------------------------------------------------------- */
 
 /**
- * ui_init - initialise ncurses, colours, and key mappings.
+ * ui_init - initialise the Windows Console, colours, and input mode.
  * Must be called once before any other ui_* function.
  */
 void ui_init(void);
@@ -95,6 +95,16 @@ int ui_get_text_input(const char *prompt, char *buf, int maxlen);
  * @param message  Body text.
  */
 void ui_show_message(const char *title, const char *message);
+
+/**
+ * ui_speak_status - draw a non-blocking "Speaking…" overlay.
+ *
+ * Shows the phrase/text being synthesised so the user knows audio is
+ * in progress.  Returns immediately; call speak_text() right after.
+ *
+ * @param text  Text that is about to be spoken (shown truncated).
+ */
+void ui_speak_status(const char *text);
 
 /**
  * ui_show_info_screen - display a full-screen informational page.
