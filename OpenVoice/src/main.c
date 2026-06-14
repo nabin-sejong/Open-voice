@@ -34,7 +34,7 @@ static void handle_about(void);
  * ---------------------------------------------------------------------- */
 int main(void)
 {
-    /* Use the locale so ncurses handles UTF-8 properly */
+    /* Use the system locale for proper character handling */
     setlocale(LC_ALL, "");
 
     /* Load (or create) the user voice profile */
@@ -45,7 +45,7 @@ int main(void)
         profile_set_defaults(&profile);
     }
 
-    /* Initialise the ncurses UI layer */
+    /* Initialise the Windows Console UI layer */
     ui_init();
 
     int choice = 0;
@@ -85,7 +85,7 @@ int main(void)
         }
     }
 
-    /* Tear down ncurses before exit */
+    /* Restore console state before exit */
     ui_cleanup();
 
     /* Persist any profile changes made during the session */
@@ -104,6 +104,7 @@ static void handle_type_message(Profile *profile)
 
     if (ui_get_text_input("Enter Message:", message, MAX_MESSAGE_LEN) == UI_OK) {
         if (strlen(message) > 0) {
+            ui_speak_status(message);       /* show overlay BEFORE blocking call */
             speak_text(message, profile);
         }
     }
@@ -125,6 +126,7 @@ static void handle_quick_phrases(Profile *profile)
     int selection = ui_phrase_board(&phrases);
 
     if (selection >= 0 && selection < phrases.count) {
+        ui_speak_status(phrases.items[selection].text);  /* show overlay */
         speak_text(phrases.items[selection].text, profile);
     }
 
@@ -150,12 +152,13 @@ static void handle_export_wav(Profile *profile)
 
     if (ui_get_text_input("Enter text to export:", message, MAX_MESSAGE_LEN) == UI_OK) {
         if (strlen(message) > 0) {
-            char wav_path[256];
-            snprintf(wav_path, sizeof(wav_path), "output.wav");
-            if (export_wav(message, wav_path, profile) == 0) {
-                ui_show_message("Success", "WAV exported to output.wav");
+            char wav_path[64];
+            if (export_wav_with_timestamp(message, wav_path, (int)sizeof(wav_path), profile) == 0) {
+                char status[80];
+                snprintf(status, sizeof(status), "Saved: %s", wav_path);
+                ui_show_message("Success", status);
             } else {
-                ui_show_message("Error", "WAV export failed. Is eSpeak NG installed?");
+                ui_show_message("Error", "WAV export failed. Check PowerShell is available.");
             }
         }
     }
@@ -173,7 +176,8 @@ static void handle_about(void)
         "Alternative Communication (AAC) system",
         "for users with speech impairments.",
         "",
-        "Built with: C99 · ncurses · eSpeak NG",
+        "Built with: C99 · Windows Console API · Windows SAPI",
+        "Prosody:    SSML <prosody> pitch & rate control",
         "",
         "Press any key to return...",
         NULL
